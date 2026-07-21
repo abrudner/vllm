@@ -715,3 +715,39 @@ def test_bgmv_expand_slice_skips_no_lora_rows():
         inputs[~no_lora_rows] @ lora_b_weights[0].T
     )
     torch.testing.assert_close(output[~no_lora_rows, lora_slice], expected)
+
+
+def test_try_amx_linear_handles_inference_mode_tensors(monkeypatch):
+    """Regression test: vLLM's model forward pass runs under
+    torch.inference_mode(), where tensors don't support a version counter
+    at all (weight._version raises RuntimeError: "Inference tensors do
+    not track version counter"). The AMX packing path must not rely on
+    it for cache invalidation -- confirmed on real AMX hardware that doing
+    so crashes the engine on the first LoRA-eligible request.
+    """
+    import vllm.lora.ops.torch_ops.lora_amx_ops as amx_mod
+
+    monkeypatch.setattr(amx_mod, "_SUPPORTS_AMX_WEIGHT_PACKED_LINEAR", True)
+    monkeypatch.setattr(amx_mod.envs, "VLLM_CPU_SGL_KERNEL", True)
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(amx_mod, "check_cpu_sgl_kernel", lambda n, k, dtype: True)
+    monkeypatch.setattr(
+        torch.ops._C, "convert_weight_packed", lambda w: w, raising=False
+    )
+    monkeypatch.setattr(
+        torch.ops._C,
+        "weight_packed_linear",
+        lambda x, w, bias, is_vnni: x @ w.T,
+        raising=False,
+    )
+
+    with torch.inference_mode():
+        weight = torch.randn(1, 16, 32, dtype=torch.bfloat16)
+        with pytest.raises(RuntimeError, match="version counter"):
+            weight._version  # sanity: this tensor really can't be version-tracked
+
+        inputs = torch.randn(4, 32, dtype=torch.bfloat16)
+        result = amx_mod.try_amx_linear(weight, inputs, torch.bfloat16, "shrink")
+
+    assert result is not None
+    torch.testing.assert_close(result, inputs @ weight[0].T)

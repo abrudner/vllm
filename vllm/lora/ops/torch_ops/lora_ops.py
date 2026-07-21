@@ -3,6 +3,8 @@
 
 import torch
 
+from vllm.lora.ops.torch_ops.lora_amx_ops import try_amx_linear
+
 
 def sgmv_expand(
     inputs: torch.Tensor,
@@ -40,11 +42,15 @@ def bgmv_expand(
         lora_indices_tensor if all_valid else lora_indices_tensor[valid_mask]
     )
 
-    selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
-    if len(selected_loras.shape) == 4:
-        selected_loras = selected_loras.squeeze(dim=1)
-    valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
+    outputs = try_amx_linear(
+        lora_b_weights, valid_inputs, output_tensor.dtype, "expand"
+    )
+    if outputs is None:
+        selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
+        if len(selected_loras.shape) == 4:
+            selected_loras = selected_loras.squeeze(dim=1)
+        valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
+        outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
 
     # LoRA adapter and model may add different amounts of padding to output
     common_len = min(outputs.shape[1], output_tensor.shape[1])
@@ -102,11 +108,15 @@ def bgmv_shrink(
         lora_indices_tensor if all_valid else lora_indices_tensor[valid_mask]
     )
 
-    selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
-    if len(selected_loras.shape) == 4:
-        selected_loras = selected_loras.squeeze(dim=1)
-    valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
+    outputs = try_amx_linear(
+        lora_b_weights, valid_inputs, output_tensor.dtype, "shrink"
+    )
+    if outputs is None:
+        selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
+        if len(selected_loras.shape) == 4:
+            selected_loras = selected_loras.squeeze(dim=1)
+        valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
+        outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
 
     if all_valid:
         output_tensor[:, : outputs.shape[1]] = scaling * outputs[:]
@@ -161,11 +171,15 @@ def bgmv_expand_slice(
         lora_indices_tensor if all_valid else lora_indices_tensor[valid_mask]
     )
 
-    selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
-    valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
-    if len(selected_loras.shape) == 4:
-        selected_loras = selected_loras.squeeze(dim=1)
-    outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
+    outputs = try_amx_linear(
+        lora_b_weights, valid_inputs, output_tensor.dtype, "expand_slice"
+    )
+    if outputs is None:
+        selected_loras = lora_b_weights[valid_indices].to(dtype=output_tensor.dtype)
+        valid_inputs = valid_inputs.to(dtype=output_tensor.dtype)
+        if len(selected_loras.shape) == 4:
+            selected_loras = selected_loras.squeeze(dim=1)
+        outputs = torch.einsum("bi, boi -> bo", valid_inputs, selected_loras)
 
     if all_valid:
         if add_inputs:
